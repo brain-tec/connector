@@ -10,23 +10,23 @@ We'll see the steps to bootstrap a new connector.
 Besides that, you may want to use the existing connectors to have some
 real implementation examples:
 
-* `OpenERP Magento Connector`_
-* `OpenERP Prestashop Connector`_
+* `Odoo Magento Connector`_
+* `Odoo Prestashop Connector`_
 
 Some boilerplate is necessary, so this document will guide you through
 some steps. Please also take a look on the :ref:`naming-convention`.
 
 For the sake of the example, we'll imagine we have to synchronize
-OpenERP with a coffee machine.
+Odoo with a coffee machine.
 
-****************
-OpenERP Manifest
-****************
+*************
+Odoo Manifest
+*************
 
-As we want to synchronize OpenERP with a coffee machine, we'll name
+As we want to synchronize Odoo with a coffee machine, we'll name
 our connector connector_coffee.
 
-First, we need to create the OpenERP addons itself, editing the
+First, we need to create the Odoo addons itself, editing the
 ``connector_coffee/__openerp__.py`` manifest.
 
 
@@ -45,11 +45,11 @@ First, we need to create the OpenERP addons itself, editing the
     Coffee Connector
     ================
 
-    Connect OpenERP to my coffee machine.
+    Connect Odoo to my coffee machine.
 
     Features:
 
-    * Poor a coffee when OpenERP is busy for too long
+    * Poor a coffee when Odoo is busy for too long
     """,
      'data': [],
      'installable': True,
@@ -82,7 +82,7 @@ That's just a matter of following a convention and creating
 .. warning:: If you miss this line of code, your ConnectorUnit classes won't
              be found.
 
-.. note:: The reason for this is that OpenERP may import the Python modules
+.. note:: The reason for this is that Odoo may import the Python modules
           of uninstalled modules, so it automatically registers the
           events and ConnectorUnit classes, even for uninstalled
           modules.
@@ -122,35 +122,37 @@ We declared the backends, but we need a model to configure them.
 We create a model ``coffee.backend`` which is an ``_inherit`` of
 ``connector.backend``. In ``connector_coffee/coffee_model.py``::
 
-    from openerp.osv import fields, orm
+    from openerp import fields, models
 
 
-    class coffee_backend(orm.Model):
+    class CoffeeBackend(models.Model):
         _name = 'coffee.backend'
         _description = 'Coffee Backend'
         _inherit = 'connector.backend'
 
         _backend_type = 'coffee'
 
-        def _select_versions(self, cr, uid, context=None):
+        @api.model
+        def _select_versions(self):
             """ Available versions
 
             Can be inherited to add custom versions.
             """
-            return [('1900', '2900')]
+            return [('1900', 'Version 1900'),
+                    ('2900', 'Version 2900')]
 
-        _columns = {
-            'version': fields.selection(
-                _select_versions,
-                string='Version',
-                required=True),
-            'location': fields.char('Location'),
-            'username': fields.char('Username'),
-            'password': fields.char('Password'),
-            'default_lang_id': fields.many2one(
-                'res.lang',
-                'Default Language'),
-        }
+        version = fields.Selection(
+            selection='_select_versions',
+            string='Version',
+            required=True,
+        )
+        location = fields.Char(string='Location')
+        username = fields.Char(string='Username')
+        password = fields.Char(string='Password')
+        default_lang_id = fields.Many2one(
+            comodel_name='res.lang',
+            string='Default Language',
+        )
 
 Notes:
 
@@ -170,25 +172,24 @@ we may want to create an abstract model for them.
 
 It can be as follows (in ``connector_coffee/connector.py``)::
 
-    from openerp.osv import orm, fields
+    from openerp import models, fields
 
 
-    class coffee_binding(orm.AbstractModel):
+    class CoffeeBinding(models.AbstractModel):
         _name = 'coffee.binding'
         _inherit = 'external.binding'
         _description = 'Coffee Binding (abstract)'
 
-        _columns = {
-            # 'openerp_id': openerp-side id must be declared in concrete model
-            'backend_id': fields.many2one(
-                'coffee.backend',
-                'Coffee Backend',
-                required=True,
-                ondelete='restrict'),
-            # fields.char because 0 is a valid coffee ID
-            'coffee_id': fields.char('ID in the Coffee Machine',
-                                     select=True),
-        }
+        # 'openerp_id': openerp-side id must be declared in concrete model
+        backend_id = fields.Many2one(
+            comodel_name='coffee.backend',
+            string='Coffee Backend',
+            required=True,
+            ondelete='restrict',
+        )
+        # fields.char because 0 is a valid coffee ID
+        coffee_id = fields.Char(string='ID in the Coffee Machine',
+                                select=True)
 
 
 ***********
@@ -204,12 +205,15 @@ I propose to create a helper method which build it for us (in
 
     def get_environment(session, model_name, backend_id):
         """ Create an environment to work with. """
-        backend_record = session.browse('coffee.backend', backend_id)
+        backend_record = session.env['coffee.backend'].browse(backend_id)
         env = Environment(backend_record, session, model_name)
         lang = backend_record.default_lang_id
         lang_code = lang.code if lang else 'en_US'
-        env.set_lang(code=lang_code)
-        return env
+        if lang_code == session.context.get('lang'):
+            return env
+        else:
+            with env.session.change_context(lang=lang_code):
+                return env
 
 Note that the part regarding the language definition is totally
 optional but I left it as an example.
@@ -238,8 +242,8 @@ We'll probably need to create synchronizers, mappers, backend adapters,
 binders and maybe our own types of ConnectorUnit classes.
 
 Their implementation can vary a lot. Have a look on the
-`OpenERP Magento Connector`_ and `OpenERP Prestashop Connector`_ projects.
+`Odoo Magento Connector`_ and `Odoo Prestashop Connector`_ projects.
 
 
-.. _`OpenERP Magento Connector`: https://github.com/OCA/connector-magento
-.. _`OpenERP Prestashop Connector`: https://github.com/OCA/connector-prestashop
+.. _`Odoo Magento Connector`: https://github.com/OCA/connector-magento
+.. _`Odoo Prestashop Connector`: https://github.com/OCA/connector-prestashop
