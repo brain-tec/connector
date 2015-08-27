@@ -19,11 +19,8 @@
 #
 ##############################################################################
 
-import inspect
 import logging
 from contextlib import contextmanager
-from openerp import models
-
 from .deprecate import log_deprecate, DeprecatedClass
 
 _logger = logging.getLogger(__name__)
@@ -49,42 +46,32 @@ def _get_openerp_module_name(module_path):
 
 
 def install_in_connector():
-    """ Installs an OpenERP module in the ``Connector`` framework.
+    log_deprecate("This call to 'install_in_connector()' has no effect and is "
+                  "not required.")
 
-    It has to be called once per OpenERP module to plug.
 
-    Under the cover, it creates a ``openerp.models.AbstractModel`` whose
-    name is the name of the module with a ``.intalled`` suffix:
-    ``{name_of_the_openerp_module_to_install}.installed``.
+def is_module_installed(env, module_name):
+    """ Check if an Odoo addon is installed.
 
-    The connector then uses this model to know when the OpenERP module
-    is installed or not and whether it should use the ConnectorUnit
-    classes of this module or not and whether it should fire the
-    consumers of events or not.
+    The function might be called before `connector` is even installed;
+    in such case, `ir_module_module.is_module_installed()` is not available yet
+    and this is why we first check the installation of `connector` by looking
+    up for a model in the registry.
+
+    :param module_name: name of the addon to check being 'connector' or
+                        an addon depending on it
+
     """
-    # Get the module of the caller
-    module = inspect.getmodule(inspect.currentframe().f_back)
-    openerp_module_name = _get_openerp_module_name(module.__name__)
-    # Build a new AbstractModel with the name of the module and the suffix
-    name = "%s.installed" % openerp_module_name
-    class_name = name.replace('.', '_')
-    # we need to call __new__ and __init__ in 2 phases because
-    # __init__ needs to have the right __module__ and _module attributes
-    model = models.MetaModel.__new__(models.MetaModel, class_name,
-                                     (models.AbstractModel,), {'_name': name})
-    # Update the module of the model, it should be the caller's one
-    model._module = openerp_module_name
-    model.__module__ = module.__name__
-    models.MetaModel.__init__(model, class_name,
-                              (models.AbstractModel,), {'_name': name})
+    if env.registry.get('connector.backend'):
+        if module_name == 'connector':
+            # fast-path: connector is necessarily installed because
+            # the model is in the registry
+            return True
+        # for another addon, check in ir.module.module
+        return env['ir.module.module'].is_module_installed(module_name)
 
-
-# install the connector itself
-install_in_connector()
-
-
-def is_module_installed(pool, module_name):
-    return bool(pool.get('%s.installed' % module_name))
+    # connector module is not installed neither any sub-addons
+    return False
 
 
 def get_openerp_module(cls_or_func):
@@ -210,9 +197,10 @@ class ConnectorUnit(object):
         :py:class:`~connector.connector.ConnectorUnit` for the current
         model and being a class or subclass of ``connector_unit_class``.
 
-        If a different ``model`` is given, a new
-        :py:class:`~connector.connector.ConnectorEnvironment`
-        is built for this model.
+        If a different ``model`` is given, a new ConnectorEnvironment is built
+        for this model. The class used for creating the new environment is
+        the same class as in `self.connector_env` which must be
+        :py:class:`~connector.connector.ConnectorEnvironment` or a subclass.
 
         :param connector_unit_class: ``ConnectorUnit`` to search
                                      (class or subclass)
@@ -225,9 +213,11 @@ class ConnectorUnit(object):
         if model is None or model == self.model._name:
             env = self.connector_env
         else:
-            env = ConnectorEnvironment(self.backend_record,
-                                       self.session,
-                                       model)
+            env = self.connector_env.create_environment(
+                self.backend_record,
+                self.session, model,
+                connector_env=self.connector_env)
+
         return env.get_connector_unit(connector_unit_class)
 
     def get_connector_unit_for_model(self, connector_unit_class, model=None):
@@ -274,7 +264,15 @@ class ConnectorEnvironment(object):
     .. attribute:: model_name
 
         Name of the OpenERP model to work with.
+
+    .. attribute:: _propagate_kwargs
+
+        List of attributes that must be used by
+        :py:meth:`connector.connector.ConnectorEnvironment.create_environment`
+        when a new connector environment is instantiated.
     """
+
+    _propagate_kwargs = []
 
     def __init__(self, backend_record, session, model_name):
         """
@@ -329,6 +327,30 @@ class ConnectorEnvironment(object):
         return self.backend.get_class(base_class, self.session,
                                       self.model_name)(self)
 
+    @classmethod
+    def create_environment(cls, backend_record, session, model,
+                           connector_env=None):
+        """ Create a new environment ConnectorEnvironment.
+
+        :param backend_record: browse record of the backend
+        :type backend_record: :py:class:`openerp.models.Model`
+        :param session: current session (cr, uid, context)
+        :type session: :py:class:`connector.session.ConnectorSession`
+        :param model_name: name of the model
+        :type model_name: str
+        :param connector_env: an existing environment from which the kwargs
+                              will be propagated to the new one
+        :type connector_env:
+            :py:class:`connector.connector.ConnectorEnvironment`
+        """
+        kwargs = {}
+        if connector_env:
+            kwargs = {key: getattr(connector_env, key)
+                      for key in connector_env._propagate_kwargs}
+        if kwargs:
+            return cls(backend_record, session, model, **kwargs)
+        else:
+            return cls(backend_record, session, model)
 
 Environment = DeprecatedClass('Environment',
                               ConnectorEnvironment)
