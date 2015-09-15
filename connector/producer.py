@@ -39,19 +39,7 @@ from .event import (on_record_create,
 from .connector import is_module_installed
 
 
-create_original = models.BaseModel.create
 
-
-@openerp.api.model
-@openerp.api.returns('self', lambda value: value.id)
-def create(self, vals):
-    record_id = create_original(self, vals)
-    if is_module_installed(self.env, 'connector'):
-        session = ConnectorSession(self.env.cr, self.env.uid,
-                                   context=self.env.context)
-        on_record_create.fire(session, self._name, record_id.id, vals)
-    return record_id
-models.BaseModel.create = create
 
 
 write_original = models.BaseModel.write
