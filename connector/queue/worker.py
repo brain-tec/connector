@@ -45,6 +45,7 @@ from ..exception import (NoSuchJobError,
                          RetryableJobError,
                          FailedJobError,
                          NothingToDoJob)
+from ..jobrunner import _channels
 
 _logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ class Worker(threading.Thread):
 
         except RetryableJobError as err:
             # delay the job later, requeue
-            retry_postpone(job, unicode(err))
+            retry_postpone(job, unicode(err), seconds=err.seconds)
             _logger.debug('%s postponed', job)
 
         except OperationalError as err:
@@ -262,7 +263,7 @@ class WorkerWatcher(threading.Thread):
         else:
             db_names = db.exp_list(True)
         dbfilter = config['dbfilter']
-        if dbfilter and db_names:
+        if dbfilter and '%d' not in dbfilter and '%h' not in dbfilter:
             db_names = [d for d in db_names if re.match(dbfilter, d)]
         available_db_names = []
         for db_name in db_names:
@@ -344,13 +345,14 @@ def start_service():
     watcher.daemon = True
     watcher.start()
 
+
 # We have to launch the Jobs Workers only if:
-# 0. The alternative connector runner is not enabled
+# 0. The alternative connector runner is not enabled (i.e. no ``_channels()``)
 # 1. OpenERP is used in standalone mode (monoprocess)
 # 2. Or it is used in multiprocess (with option ``--workers``)
 #    but the current process is a Connector Worker
 #    (launched with the ``openerp-connector-worker`` script).
-if not os.environ.get('ODOO_CONNECTOR_CHANNELS'):
+if not _channels():
     if (not getattr(openerp, 'multi_process', False) or
             getattr(openerp, 'worker_connector', False)):
         start_service()

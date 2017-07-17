@@ -89,6 +89,7 @@ class QueueJob(models.Model):
     func_name = fields.Char(readonly=True)
     job_function_id = fields.Many2one(comodel_name='queue.job.function',
                                       compute='_compute_channel',
+                                      string='Job Function',
                                       readonly=True,
                                       store=True)
     # for searching without JOIN on channels
@@ -161,8 +162,7 @@ class QueueJob(models.Model):
         return res
 
     @api.multi
-    def _subscribe_users(self):
-        """ Subscribe all users having the 'Connector Manager' group """
+    def _get_subscribe_users_domain(self):
         group = self.env.ref('connector.group_connector_manager')
         if not group:
             return
@@ -170,6 +170,12 @@ class QueueJob(models.Model):
         domain = [('groups_id', '=', group.id)]
         if companies:
             domain.append(('company_id', 'child_of', companies.ids))
+        return domain
+
+    @api.multi
+    def _subscribe_users(self):
+        """ Subscribe all users having the 'Connector Manager' group """
+        domain = self._get_subscribe_users_domain()
         users = self.env['res.users'].search(domain)
         self.message_subscribe_users(user_ids=users.ids)
 

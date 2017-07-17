@@ -24,8 +24,9 @@ import functools
 import logging
 import uuid
 import sys
-from datetime import datetime, timedelta, MINYEAR
-from pickle import loads, dumps, UnpicklingError
+from datetime import date, datetime, timedelta, MINYEAR
+from cPickle import dumps, UnpicklingError, Unpickler
+from cStringIO import StringIO
 
 import openerp
 from openerp.tools.translate import _
@@ -54,6 +55,32 @@ RETRY_INTERVAL = 10 * 60  # seconds
 _logger = logging.getLogger(__name__)
 
 
+_UNPICKLE_WHITELIST = set()
+
+
+def whitelist_unpickle_global(fn_or_class):
+    """ Allow a function or class to be used in jobs
+
+    By default, the only types allowed to be used in job arguments are:
+
+    * the builtins: str/unicode, int/long, float, bool, tuple, list, dict, None
+    * the pre-registered: datetime.datetime datetime.timedelta
+
+    If you need to use an argument in a job which is not in this whitelist,
+    you can add it by using::
+
+        whitelist_unpickle_global(fn_or_class_to_register)
+
+    """
+    _UNPICKLE_WHITELIST.add(fn_or_class)
+
+
+# register common types that might be used in job arguments
+whitelist_unpickle_global(datetime)
+whitelist_unpickle_global(timedelta)
+whitelist_unpickle_global(date)
+
+
 def _unpickle(pickled):
     """ Unpickles a string and catch all types of errors it can throw,
     to raise only NotReadableJobError in case of error.
@@ -63,9 +90,26 @@ def _unpickle(pickled):
     `loads()` may raises many types of exceptions (AttributeError,
     IndexError, TypeError, KeyError, ...). They are all catched and
     raised as `NotReadableJobError`).
+
+    Pickle could be exploited by an attacker who would write a value in a job
+    that would run arbitrary code when unpickled. This is why we set a custom
+    ``find_global`` method on the ``Unpickler``, only jobs and a whitelist of
+    classes/functions are allowed to be unpickled (plus the builtins types).
     """
+    def restricted_find_global(mod_name, fn_name):
+        __import__(mod_name)
+        mod = sys.modules[mod_name]
+        fn = getattr(mod, fn_name)
+        if not (fn in JOB_REGISTRY or fn in _UNPICKLE_WHITELIST):
+            raise UnpicklingError(
+                '{}.{} is not allowed in jobs'.format(mod_name, fn_name)
+            )
+        return fn
+
+    unpickler = Unpickler(StringIO(pickled))
+    unpickler.find_global = restricted_find_global
     try:
-        unpickled = loads(pickled)
+        unpickled = unpickler.load()
     except (StandardError, UnpicklingError):
         raise NotReadableJobError('Could not unpickle.', pickled)
     return unpickled
@@ -148,7 +192,7 @@ class OpenERPJobStorage(JobStorage):
         model = self.job_model.sudo().with_context(active_test=False)
         record = model.search([('uuid', '=', job_uuid)], limit=1)
         if record:
-            return record
+            return record.with_env(self.job_model.env)
 
     def db_record(self, job_):
         return self.db_record_from_uuid(job_.uuid)
@@ -464,9 +508,13 @@ class Job(object):
         with session.change_user(self.user_id):
             self.retry += 1
             try:
-                self.result = self.func(session, *self.args, **self.kwargs)
-            except RetryableJobError:
-                if not self.max_retries:  # infinite retries
+                with session.change_context({'job_uuid': self._uuid}):
+                    self.result = self.func(session, *self.args, **self.kwargs)
+            except RetryableJobError as err:
+                if err.ignore_retry:
+                    self.retry -= 1
+                    raise
+                elif not self.max_retries:  # infinite retries
                     raise
                 elif self.retry >= self.max_retries:
                     type_, value, traceback = sys.exc_info()
@@ -691,7 +739,7 @@ def job(func=None, default_channel='root', retry_pattern=None):
             # retries 5 to 10 postponed 20 minutes later
             # retries 10 to 15 postponed 30 minutes later
             # all subsequent retries postponed 12 hours later
-            raise RetryableJobError
+            raise RetryableJobError('Must be retried later')
 
         retryable_example.delay(session)
 

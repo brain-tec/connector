@@ -1,12 +1,57 @@
 Changelog
 ---------
 
-Future
-~~~~~~
+.. Future (?)
+.. ~~~~~~~~~~
+.. 
+.. * 
 
-* method 'install_in_connector' is now deprecated
-* Add a retry pattern for jobs (https://github.com/OCA/connector/pull/75)
+
+Future (?)
+~~~~~~~~~~
+
+* Fix backend_to_m2o to extract id of the binding (https://github.com/OCA/connector/pull/153)
+
+
+8.0.3.3.0 (2016-02-29)
+~~~~~~~~~~~~~~~~~~~~~~
+
+* Allow to define seconds when raising a RetryableJobError (https://github.com/OCA/connector/pull/124)
+* Allow to ignore the retry counter when raising a RetryableJobError (https://github.com/OCA/connector/pull/124)
+* Add 'mock_job_delay_to_direct' to ease tests on jobs (https://github.com/OCA/connector/pull/123)
+* Add helper function to acquire Posgres advisory locks (https://github.com/OCA/connector/pull/138, https://github.com/OCA/connector/pull/139)
+* Improvement of 'is_module_installed' which now uses the registry instead of db + cache (https://github.com/OCA/connector/pull/130)
+* Security: Prevent to unpickle globals which are not jobs or whitelisted types (https://github.com/OCA/connector/pull/170)
+* Fix: Manage non-ascii Postgres errors (https://github.com/OCA/connector/pull/167)
+* Fix: ignore dbfilter containing %d or %h (https://github.com/OCA/connector/pull/166)
+* Fix: correctly obtain the list of database with odoo is started with --no-database-list (https://github.com/OCA/connector/pull/164)
+* Fix: Set job back to 'pending' in case of exception (https://github.com/OCA/connector/pull/150, https://github.com/OCA/connector/pull/151, https://github.com/OCA/connector/pull/152, https://github.com/OCA/connector/pull/155)
+* Fix: Clear environment caches and recomputations upon failures (https://github.com/OCA/connector/pull/131)
+* Fix: when a job fails, inactive users are no longer added to its followers (https://github.com/OCA/connector/pull/137)
+* Fix: Set job to failed after non-retryable OperationalError (https://github.com/OCA/connector/pull/132)
+* Fix: wrong model in connector_base_product's views (https://github.com/OCA/connector/pull/119)
+* Various documentation improvements
+
+
+3.2.0 (2015-09-10)
+~~~~~~~~~~~~~~~~~~
+
+* method 'install_in_connector' is now deprecated (https://github.com/OCA/connector/pull/74)
+* Add a retry pattern for jobs (https://github.com/OCA/connector/pull/75, https://github.com/OCA/connector/pull/92)
 * Use custom connector environments and instantiate them with needed attributes (https://github.com/OCA/connector/pull/108)
+* A new default implementation for the binder (https://github.com/OCA/connector/pull/76)
+* Translations are now automatically synchronized from Transifex
+* Mapper: add modifier to follow m2o relations with dot notation (https://github.com/OCA/connector/pull/94)
+* Mapper: add 'changed_by_fields' which indicates which source fields will output data (https://github.com/OCA/connector/pull/73)
+* Allow to assign a default channel on @job functions (https://github.com/OCA/connector/pull/71)
+* Fix: connector-runner: manages retryable errors (https://github.com/OCA/connector/pull/87)
+* Fix: connector-runner: logging error when a capacity is None (https://github.com/OCA/connector/pull/98)
+* Fix: connector-runner: shows a wrong job result on retried jobs (https://github.com/OCA/connector/pull/101)
+* Fix: add an index on queue_job.worker_id (https://github.com/OCA/connector/pull/89)
+* Fix: Tests: common.DB is gone in 8.0 stable (https://github.com/OCA/connector/pull/79)
+* Fix: connector-runner: graceful stop mechanism (https://github.com/OCA/connector/pull/69)
+* Fix: connector-runner: Wrong arguments position in a log message (https://github.com/OCA/connector/pull/67)
+
 
 3.1.0 (2015-05-15)
 ~~~~~~~~~~~~~~~~~~

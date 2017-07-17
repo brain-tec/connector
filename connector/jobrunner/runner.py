@@ -24,8 +24,8 @@
 #
 ##############################################################################
 """
-What's is the job runner?
--------------------------
+What is the job runner?
+-----------------------
 This is an alternative to connector workers, with the goal
 of resolving issues due to the polling nature of workers:
 
@@ -46,21 +46,40 @@ How does it work?
 * It maintains an in-memory priority queue of jobs that
   is populated from the queue_job tables in all databases.
 * It does not run jobs itself, but asks Odoo to run them through an
-  anonymous /connector/runjob HTTP request [1].
+  anonymous ``/connector/runjob`` HTTP request. [1]_
 
 How to use it?
 --------------
 
 * Set the following environment variables:
 
-  - ODOO_CONNECTOR_CHANNELS=root:4 (or any other channels configuration)
-  - optional if xmlrpc_port is not set: ODOO_CONNECTOR_PORT=8069
+  - ``ODOO_CONNECTOR_CHANNELS=root:4`` (or any other channels configuration)
+  - optional if ``xmlrpc_port`` is not set: ``ODOO_CONNECTOR_PORT=8069``
 
-* Start Odoo with --load=web,connector and --workers > 1. [2]
-* Disable then "Enqueue Jobs" cron.
+* Or alternatively, set ``channels = root:4`` in the ``[options-connector]``
+  section of the odoo configuration file.
+
+* Start Odoo with ``--load=web,web_kanban,connector``
+  and ``--workers`` greater than 1. [2]_
+
+* Confirm the runner is starting correctly by checking the odoo log file:
+
+.. code-block:: none
+
+  ...INFO...connector.jobrunner.runner: starting
+  ...INFO...connector.jobrunner.runner: initializing database connections
+  ...INFO...connector.jobrunner.runner: connector runner ready for db <dbname>
+  ...INFO...connector.jobrunner.runner: database connections ready
+
+* Disable the "Enqueue Jobs" cron.
+
 * Do NOT start openerp-connector-worker.
+
 * Create jobs (eg using base_import_async) and observe they
   start immediately and in parallel.
+
+* Tip: to enable debug logging for the connector, use
+  ``--log-handler=openerp.addons.connector:DEBUG``
 
 Caveat
 ------
@@ -68,13 +87,29 @@ Caveat
 * After creating a new database or installing connector on an
   existing database, Odoo must be restarted for the runner to detect it.
 
-Notes
------
-[1] From a security standpoint, it is safe to have an anonymous HTTP
-    request because this request only accepts to run jobs that are
-    enqueued.
-[2] It works with the threaded Odoo server too, although this is
-    obviously not for production purposes.
+* When Odoo shuts down normally, it waits for running jobs to finish.
+  However, when the Odoo server crashes or is otherwise force-stopped,
+  running jobs are interrupted while the runner has no chance to know
+  they have been aborted. In such situations, jobs may remain in
+  ``started`` or ``enqueued`` state after the Odoo server is halted.
+  Since the runner has no way to know if they are actually running or
+  not, and does not know for sure if it is safe to restart the jobs,
+  it does not attempt to restart them automatically. Such stale jobs
+  therefore fill the running queue and prevent other jobs to start.
+  You must therefore requeue them manually, either from the Jobs view,
+  or by running the following SQL statement *before starting Odoo*:
+
+.. code-block:: sql
+
+  update queue_job set state='pending' where state in ('started', 'enqueued')
+
+.. rubric:: Footnotes
+
+.. [1] From a security standpoint, it is safe to have an anonymous HTTP
+       request because this request only accepts to run jobs that are
+       enqueued.
+.. [2] It works with the threaded Odoo server too, although this way
+       of running Odoo is obviously not for production purposes.
 """
 
 from contextlib import closing
@@ -90,8 +125,9 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import requests
 
 import openerp
+from openerp.tools import config
 
-from .channels import ChannelManager, ENQUEUED, NOT_DONE
+from .channels import ChannelManager, PENDING, ENQUEUED, NOT_DONE
 
 SELECT_TIMEOUT = 60
 ERROR_RECOVERY_DELAY = 5
@@ -99,19 +135,52 @@ ERROR_RECOVERY_DELAY = 5
 _logger = logging.getLogger(__name__)
 
 
-def _async_http_get(url):
+# Unfortunately, it is not possible to extend the Odoo
+# server command line arguments, so we resort to environment variables
+# to configure the runner (channels mostly).
+#
+# On the other hand, the odoo configuration file can be extended at will,
+# so we check it in addition to the environment variables.
+
+
+def _channels():
+    # environment takes precedence over config file if set.
+    # If set to "" will disable the runner.
+    env_channels = os.environ.get('ODOO_CONNECTOR_CHANNELS', None)
+    return (
+        env_channels if env_channels is not None
+        else config.misc.get("options-connector", {}).get("channels")
+    )
+
+
+def _async_http_get(port, db_name, job_uuid):
+    # Method to set failed job (due to timeout, etc) as pending,
+    # to avoid keeping it as enqueued.
+    def set_job_pending():
+        conn = psycopg2.connect(openerp.sql_db.dsn(db_name)[1])
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        with closing(conn.cursor()) as cr:
+            cr.execute(
+                "UPDATE queue_job SET state=%s, "
+                "date_enqueued=NULL, date_started=NULL "
+                "WHERE uuid=%s and state=%s", (PENDING, job_uuid, ENQUEUED)
+            )
+
     # TODO: better way to HTTP GET asynchronously (grequest, ...)?
     #       if this was python3 I would be doing this with
     #       asyncio, aiohttp and aiopg
     def urlopen():
+        url = ('http://localhost:%s/connector/runjob?db=%s&job_uuid=%s' %
+               (port, db_name, job_uuid))
         try:
             # we are not interested in the result, so we set a short timeout
             # but not too short so we trap and log hard configuration errors
             requests.get(url, timeout=1)
         except requests.Timeout:
-            pass
+            set_job_pending()
         except:
             _logger.exception("exception in GET %s", url)
+            set_job_pending()
     thread = threading.Thread(target=urlopen)
     thread.daemon = True
     thread.start()
@@ -186,10 +255,11 @@ class Database(object):
             cr.execute("LISTEN connector")
 
     def select_jobs(self, where, args):
-        query = "SELECT %s, uuid, id as seq, date_created, priority, eta, state " \
-                "FROM queue_job WHERE %s" % \
-                ('channel' if self.has_channel else 'NULL',
-                 where)
+        query = ("SELECT %s, uuid, id as seq, date_created, "
+                 "priority, eta, state "
+                 "FROM queue_job WHERE %s" %
+                 ('channel' if self.has_channel else 'NULL',
+                  where))
         with closing(self.conn.cursor()) as cr:
             cr.execute(query, args)
             return list(cr.fetchall())
@@ -217,9 +287,9 @@ class ConnectorRunner(object):
         if openerp.tools.config['db_name']:
             db_names = openerp.tools.config['db_name'].split(',')
         else:
-            db_names = openerp.service.db.exp_list()
+            db_names = openerp.service.db.exp_list(True)
         dbfilter = openerp.tools.config['dbfilter']
-        if dbfilter:
+        if dbfilter and '%d' not in dbfilter and '%h' not in dbfilter:
             db_names = [d for d in db_names if re.match(dbfilter, d)]
         return db_names
 
@@ -253,9 +323,7 @@ class ConnectorRunner(object):
             _logger.info("asking Odoo to run job %s on db %s",
                          job.uuid, job.db_name)
             self.db_by_name[job.db_name].set_job_enqueued(job.uuid)
-            _async_http_get('http://localhost:%s'
-                            '/connector/runjob?db=%s&job_uuid=%s' %
-                            (self.port, job.db_name, job.uuid))
+            _async_http_get(self.port, job.db_name, job.uuid)
 
     def process_notifications(self):
         for db in self.db_by_name.values():
