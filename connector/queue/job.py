@@ -25,7 +25,8 @@ import logging
 import uuid
 import sys
 from datetime import datetime, timedelta, MINYEAR
-from pickle import loads, dumps, UnpicklingError
+from cPickle import dumps, UnpicklingError, Unpickler
+from cStringIO import StringIO
 
 from openerp import SUPERUSER_ID
 from openerp.tools import DEFAULT_SERVER_DATETIME_FORMAT
@@ -55,6 +56,31 @@ RETRY_INTERVAL = 10 * 60  # seconds
 _logger = logging.getLogger(__name__)
 
 
+_UNPICKLE_WHITELIST = set()
+
+
+def whitelist_unpickle_global(fn_or_class):
+    """ Allow a function or class to be used in jobs
+
+    By default, the only types allowed to be used in job arguments are:
+
+    * the builtins: str/unicode, int/long, float, bool, tuple, list, dict, None
+    * the pre-registered: datetime.datetime datetime.timedelta
+
+    If you need to use an argument in a job which is not in this whitelist,
+    you can add it by using::
+
+        whitelist_unpickle_global(fn_or_class_to_register)
+
+    """
+    _UNPICKLE_WHITELIST.add(fn_or_class)
+
+
+# register common types that might be used in job arguments
+whitelist_unpickle_global(datetime)
+whitelist_unpickle_global(timedelta)
+
+
 def _unpickle(pickled):
     """ Unpickles a string and catch all types of errors it can throw,
     to raise only NotReadableJobError in case of error.
@@ -64,9 +90,27 @@ def _unpickle(pickled):
     `loads()` may raises many types of exceptions (AttributeError,
     IndexError, TypeError, KeyError, ...). They are all catched and
     raised as `NotReadableJobError`).
+
+    Pickle could be exploited by an attacker who would write a value in a job
+    that would run arbitrary code when unpickled. This is why we set a custom
+    ``find_global`` method on the ``Unpickler``, only jobs and a whitelist of
+    classes/functions are allowed to be unpickled (plus the builtins types).
     """
+    def restricted_find_global(mod_name, fn_name):
+        __import__(mod_name)
+        mod = sys.modules[mod_name]
+        fn = getattr(mod, fn_name)
+        if not (fn in JOB_REGISTRY or fn in _UNPICKLE_WHITELIST):
+            raise UnpicklingError(
+                '{}.{} is not allowed in jobs'.format(mod_name, fn_name)
+            )
+
+        return fn
+
+    unpickler = Unpickler(StringIO(pickled))
+    unpickler.find_global = restricted_find_global
     try:
-        unpickled = loads(pickled)
+        unpickled = unpickler.load()
     except (StandardError, UnpicklingError):
         raise NotReadableJobError('Could not unpickle.', pickled)
     return unpickled
@@ -186,6 +230,7 @@ class OpenERPJobStorage(JobStorage):
                 'date_started': False,
                 'date_done': False,
                 'eta': False,
+                'func_name': job_.func_name,
                 }
 
         if job_.date_enqueued:
@@ -558,12 +603,13 @@ class Job(object):
                              " it must be an 'int', a 'timedelta' "
                              "or a 'datetime'" % type(value))
 
-    def set_pending(self, result=None):
+    def set_pending(self, result=None, reset_retry=True):
         self.state = PENDING
         self.date_enqueued = None
         self.date_started = None
         self.worker_uuid = None
-        self.retry = 0
+        if reset_retry:
+            self.retry = 0
         if result is not None:
             self.result = result
 
@@ -599,13 +645,27 @@ class Job(object):
         result = msg if msg is not None else _('Canceled. Nothing to do.')
         self.set_done(result=result)
 
+    def _get_retry_seconds(self, seconds=None):
+        retry_pattern = self.func.retry_pattern
+        if not seconds and retry_pattern:
+            # ordered from higher to lower count of retries
+            patt = sorted(retry_pattern.iteritems(), key=lambda t: t[0])
+            seconds = RETRY_INTERVAL
+            for retry_count, postpone_seconds in patt:
+                if self.retry >= retry_count:
+                    seconds = postpone_seconds
+                else:
+                    break
+        elif not seconds:
+            seconds = RETRY_INTERVAL
+        return seconds
+
     def postpone(self, result=None, seconds=None):
         """ Write an estimated time arrival to n seconds
         later than now. Used when an retryable exception
         want to retry a job later. """
-        if seconds is None:
-            seconds = RETRY_INTERVAL
-        self.eta = timedelta(seconds=seconds)
+        eta_seconds = self._get_retry_seconds(seconds)
+        self.eta = timedelta(seconds=eta_seconds)
         self.exc_info = None
         if result is not None:
             self.result = result
@@ -616,8 +676,24 @@ class Job(object):
         return self.func.related_action(session, self)
 
 
-def job(func):
+JOB_REGISTRY = set()
+
+
+def job(func=None, default_channel='root', retry_pattern=None):
     """ Decorator for jobs.
+
+    Optional argument:
+
+    :param default_channel: the channel wherein the job will be assigned. This
+                            channel is set at the installation of the module
+                            and can be manually changed later using the views.
+    :param retry_pattern: The retry pattern to use for postponing a job.
+                          If a job is postponed and there is no eta
+                          specified, the eta will be determined from the
+                          dict in retry_pattern. When no retry pattern
+                          is provided, jobs will be retried after
+                          :const:`RETRY_INTERVAL` seconds.
+    :type retry_pattern: dict(retry_count,retry_eta_seconds)
 
    Add a ``delay`` attribute on the decorated function.
 
@@ -626,19 +702,22 @@ def job(func):
    arguments given in ``delay`` will be the arguments used by the
    decorated function when it is executed.
 
-   The ``delay()`` function of a job takes the following arguments:
+   ``retry_pattern`` is a dict where keys are the count of retries and the
+    values are the delay to postpone a job.
 
-   session
-     Current :py:class:`~openerp.addons.connector.session.ConnectorSession`
+    The ``delay()`` function of a job takes the following arguments:
 
-   model_name
-     name of the model on which the job has something to do
+    session
+      Current :py:class:`~openerp.addons.connector.session.ConnectorSession`
 
-   *args and **kargs
+    model_name
+      name of the model on which the job has something to do
+
+    *args and **kargs
      Arguments and keyword arguments which will be given to the called
      function once the job is executed. They should be ``pickle-able``.
 
-     There is 4 special and reserved keyword arguments that you can use:
+     There are 4 special and reserved keyword arguments that you can use:
 
      * priority: priority of the job, the smaller is the higher priority.
                  Default is 10.
@@ -647,7 +726,6 @@ def job(func):
                     infinite retries. Default is 5.
      * eta: the job can be executed only after this datetime
             (or now + timedelta if a timedelta or integer is given)
-
      * description : a human description of the job,
                      intended to discriminate job instances
                      (Default is the func.__doc__ or
@@ -673,10 +751,33 @@ def job(func):
         # => the job will be executed with a low priority and not before a
         # delay of 5 hours from now
 
+        @job(default_channel='root.subchannel')
+        def export_one_thing(session, model_name, one_thing):
+            # work
+            # export one_thing
+
+        @job(retry_pattern={1: 10 * 60,
+                            5: 20 * 60,
+                            10: 30 * 60,
+                            15: 12 * 60 * 60})
+        def retryable_example(session):
+            # 5 first retries postponed 10 minutes later
+            # retries 5 to 10 postponed 20 minutes later
+            # retries 10 to 15 postponed 30 minutes later
+            # all subsequent retries postponed 12 hours later
+            raise RetryableJobError
+
+        retryable_example.delay(session)
+
+
     See also: :py:func:`related_action` a related action can be attached
     to a job
 
     """
+    if func is None:
+        return functools.partial(job, default_channel=default_channel,
+                                 retry_pattern=retry_pattern)
+
     def delay(session, model_name, *args, **kwargs):
         """Enqueue the function. Return the uuid of the created job."""
         return OpenERPJobStorage(session).enqueue_resolve_args(
@@ -684,7 +785,16 @@ def job(func):
             model_name=model_name,
             *args,
             **kwargs)
+
+    assert default_channel == 'root' or default_channel.startswith('root.'), (
+        "The channel path must start by 'root'")
+    func.default_channel = default_channel
+    assert retry_pattern is None or isinstance(retry_pattern, dict), (
+        "retry_pattern must be a dict"
+    )
+    func.retry_pattern = retry_pattern
     func.delay = delay
+    JOB_REGISTRY.add(func)
     return func
 
 

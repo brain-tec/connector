@@ -1,23 +1,29 @@
 # -*- coding: utf-8 -*-
 
+import cPickle
 import mock
 import unittest2
 from datetime import datetime, timedelta
 
+
 import openerp
-from openerp import SUPERUSER_ID
+from openerp.osv import orm
+from openerp import SUPERUSER_ID, exceptions
 import openerp.tests.common as common
 from openerp.addons.connector.queue.job import (
     Job,
     OpenERPJobStorage,
     job,
+    _unpickle,
+    RETRY_INTERVAL,
 )
 from openerp.addons.connector.session import (
     ConnectorSession,
 )
 from openerp.addons.connector.exception import (
     RetryableJobError,
-    FailedJobError
+    FailedJobError,
+    NotReadableJobError,
 )
 
 
@@ -40,6 +46,15 @@ def dummy_task_args(session, model_name, a, b, c=None):
 
 def retryable_error_task(session):
     raise RetryableJobError
+
+
+def pickle_forbidden_function(session):
+    pass
+
+
+@job
+def pickle_allowed_function(session):
+    pass
 
 
 class TestJobs(unittest2.TestCase):
@@ -103,12 +118,108 @@ class TestJobs(unittest2.TestCase):
     def test_retryable_error(self):
         test_job = Job(func=retryable_error_task,
                        max_retries=3)
+        self.assertEqual(test_job.retry, 0)
         with self.assertRaises(RetryableJobError):
             test_job.perform(self.session)
+        self.assertEqual(test_job.retry, 1)
         with self.assertRaises(RetryableJobError):
             test_job.perform(self.session)
+        self.assertEqual(test_job.retry, 2)
         with self.assertRaises(FailedJobError):
             test_job.perform(self.session)
+        self.assertEqual(test_job.retry, 3)
+
+    def test_infinite_retryable_error(self):
+        test_job = Job(func=retryable_error_task,
+                       max_retries=0)
+        self.assertEqual(test_job.retry, 0)
+        with self.assertRaises(RetryableJobError):
+            test_job.perform(self.session)
+        self.assertEqual(test_job.retry, 1)
+
+    def test_retry_pattern(self):
+        """ When we specify a retry pattern, the eta must follow it"""
+        datetime_path = 'openerp.addons.connector.queue.job.datetime'
+        test_pattern = {
+            1: 60,
+            2: 180,
+            3: 10,
+            5: 300,
+        }
+        job(retryable_error_task, retry_pattern=test_pattern)
+        with mock.patch(datetime_path, autospec=True) as mock_datetime:
+            mock_datetime.now.return_value = datetime(2015, 6, 1, 15, 10, 0)
+            test_job = Job(func=retryable_error_task,
+                           max_retries=0)
+            test_job.retry += 1
+            test_job.postpone(self.session)
+            self.assertEqual(test_job.retry, 1)
+            self.assertEqual(test_job.eta, datetime(2015, 6, 1, 15, 11, 0))
+            test_job.retry += 1
+            test_job.postpone(self.session)
+            self.assertEqual(test_job.retry, 2)
+            self.assertEqual(test_job.eta, datetime(2015, 6, 1, 15, 13, 0))
+            test_job.retry += 1
+            test_job.postpone(self.session)
+            self.assertEqual(test_job.retry, 3)
+            self.assertEqual(test_job.eta, datetime(2015, 6, 1, 15, 10, 10))
+            test_job.retry += 1
+            test_job.postpone(self.session)
+            self.assertEqual(test_job.retry, 4)
+            self.assertEqual(test_job.eta, datetime(2015, 6, 1, 15, 10, 10))
+            test_job.retry += 1
+            test_job.postpone(self.session)
+            self.assertEqual(test_job.retry, 5)
+            self.assertEqual(test_job.eta, datetime(2015, 6, 1, 15, 15, 00))
+
+    def test_retry_pattern_no_zero(self):
+        """ When we specify a retry pattern without 0, uses RETRY_INTERVAL"""
+        test_pattern = {
+            3: 180,
+        }
+        job(retryable_error_task, retry_pattern=test_pattern)
+        test_job = Job(func=retryable_error_task,
+                       max_retries=0)
+        test_job.retry += 1
+        self.assertEqual(test_job.retry, 1)
+        self.assertEqual(test_job._get_retry_seconds(), RETRY_INTERVAL)
+        test_job.retry += 1
+        self.assertEqual(test_job.retry, 2)
+        self.assertEqual(test_job._get_retry_seconds(), RETRY_INTERVAL)
+        test_job.retry += 1
+        self.assertEqual(test_job.retry, 3)
+        self.assertEqual(test_job._get_retry_seconds(), 180)
+        test_job.retry += 1
+        self.assertEqual(test_job.retry, 4)
+        self.assertEqual(test_job._get_retry_seconds(), 180)
+
+    def test_unpickle(self):
+        pickle = ("S'a small cucumber preserved in vinegar, "
+                  "brine, or a similar solution.'\np0\n.")
+        self.assertEqual(_unpickle(pickle),
+                         'a small cucumber preserved in vinegar, '
+                         'brine, or a similar solution.')
+
+    def test_unpickle_unsafe(self):
+        """ unpickling function not decorated by @job is forbidden """
+        pickled = cPickle.dumps(pickle_forbidden_function)
+        with self.assertRaises(NotReadableJobError):
+            _unpickle(pickled)
+
+    def test_unpickle_safe(self):
+        """ unpickling function decorated by @job is allowed """
+        pickled = cPickle.dumps(pickle_allowed_function)
+        self.assertEqual(_unpickle(pickled), pickle_allowed_function)
+
+    def test_unpickle_whitelist(self):
+        """ unpickling function/class that is in the whitelist is allowed """
+        arg = datetime(2016, 2, 10)
+        pickled = cPickle.dumps(arg)
+        self.assertEqual(_unpickle(pickled), arg)
+
+    def test_unpickle_not_readable(self):
+        with self.assertRaises(NotReadableJobError):
+            self.assertEqual(_unpickle('cucumber'))
 
 
 class TestJobStorage(common.TransactionCase):
@@ -362,3 +473,117 @@ class TestJobStorageMultiCompany(common.TransactionCase):
         followers_id = [f.id for f in stored_brw.message_follower_ids]
         self.assertIn(self.other_partner_id_a, followers_id)
         self.assertNotIn(self.other_partner_id_b, followers_id)
+
+
+class TestJobChannels(common.TransactionCase):
+
+    def setUp(self):
+        super(TestJobChannels, self).setUp()
+        self.function_model = self.registry('queue.job.function')
+        self.channel_model = self.registry('queue.job.channel')
+        self.job_model = self.registry('queue.job')
+        self.root_channel = self.ref('connector.channel_root')
+        self.session = ConnectorSession(self.cr, self.uid, context={})
+
+    def test_channel_complete_name(self):
+        cr, uid = self.cr, self.uid
+        channel = self.channel_model.create(cr, uid,
+                                            {'name': 'number',
+                                             'parent_id': self.root_channel,
+                                             })
+        subchannel = self.channel_model.create(cr, uid,
+                                               {'name': 'five',
+                                                'parent_id': channel,
+                                                })
+        channel = self.channel_model.browse(cr, uid, channel)
+        subchannel = self.channel_model.browse(cr, uid, subchannel)
+        self.assertEquals(channel.complete_name, 'root.number')
+        self.assertEquals(subchannel.complete_name, 'root.number.five')
+
+    def test_channel_tree(self):
+        with self.assertRaises(orm.except_orm):
+            self.channel_model.create(self.cr, self.uid, {'name': 'sub'})
+
+    def test_channel_root(self):
+        with self.assertRaises(exceptions.Warning):
+            self.channel_model.unlink(self.cr, self.uid, self.root_channel)
+        with self.assertRaises(exceptions.Warning):
+            self.channel_model.write(self.cr, self.uid, self.root_channel,
+                                     {'name': 'leaf'})
+
+    def test_register_jobs(self):
+        job(task_a)
+        job(task_b)
+        self.function_model._register_jobs(self.cr)
+        path_a = 'openerp.addons.connector.tests.test_job.task_a'
+        path_b = 'openerp.addons.connector.tests.test_job.task_b'
+        self.assertTrue(self.function_model.search(
+            self.cr, self.uid, [('name', '=', path_a)]))
+        self.assertTrue(self.function_model.search(
+            self.cr, self.uid, [('name', '=', path_b)]))
+
+    def test_channel_on_job(self):
+        job(task_a)
+        self.function_model._register_jobs(self.cr)
+        path_a = 'openerp.addons.connector.tests.test_job.task_a'
+        func_ids = self.function_model.search(
+            self.cr, self.uid, [('name', '=', path_a)])
+        self.assertEqual(len(func_ids), 1)
+        job_func = self.function_model.browse(self.cr, self.uid, func_ids[0])
+        self.assertEquals(job_func.channel, 'root')
+
+        test_job = Job(func=task_a)
+        storage = OpenERPJobStorage(self.session)
+        storage.store(test_job)
+        stored_ids = self.job_model.search(
+            self.cr, self.uid, [('uuid', '=', test_job.uuid)])
+        self.assertEqual(len(stored_ids), 1)
+        stored = self.job_model.browse(self.cr, self.uid, stored_ids[0])
+        self.assertEquals(stored.channel, 'root')
+
+        channel = self.channel_model.create(self.cr, self.uid,
+                                            {'name': 'sub',
+                                             'parent_id': self.root_channel,
+                                             })
+        job_func.refresh()
+        self.function_model.write(
+            self.cr, self.uid, job_func.id, {'channel_id': channel})
+
+        test_job = Job(func=task_a)
+        storage = OpenERPJobStorage(self.session)
+        storage.store(test_job)
+        stored_ids = self.job_model.search(
+            self.cr, self.uid, [('uuid', '=', test_job.uuid)])
+        self.assertEqual(len(stored_ids), 1)
+        stored = self.job_model.browse(self.cr, self.uid, stored_ids[0])
+        self.assertEquals(stored.channel, 'root.sub')
+
+    def test_default_channel(self):
+        func_ids = self.function_model.search(self.cr, self.uid, [])
+        self.function_model.unlink(self.cr, self.uid, func_ids)
+        job(task_a, default_channel='root.sub.subsub')
+        self.assertEquals(task_a.default_channel, 'root.sub.subsub')
+
+        self.function_model._register_jobs(self.cr)
+
+        path_a = 'openerp.addons.connector.tests.test_job.task_a'
+        func_ids = self.function_model.search(
+            self.cr, self.uid, [('name', '=', path_a)])
+        self.assertEqual(len(func_ids), 1)
+        job_func = self.function_model.browse(self.cr, self.uid, func_ids[0])
+
+        self.assertEquals(job_func.channel, 'root.sub.subsub')
+        channel = job_func.channel_id
+        self.assertEquals(channel.name, 'subsub')
+        self.assertEquals(channel.parent_id.name, 'sub')
+        self.assertEquals(channel.parent_id.parent_id.name, 'root')
+
+    def test_job_decorator(self):
+        """ Test the job decorator """
+        default_channel = 'channel'
+        retry_pattern = {1: 5}
+        partial = job(None, default_channel=default_channel,
+                      retry_pattern=retry_pattern)
+        self.assertEquals(partial.keywords.get('default_channel'),
+                          default_channel)
+        self.assertEquals(partial.keywords.get('retry_pattern'), retry_pattern)

@@ -20,7 +20,7 @@
 ##############################################################################
 
 {'name': 'Connector',
- 'version': '2.2.0',
+ 'version': '7.0.2.3.0',
  'author': "Camptocamp,Openerp Connector Core Editors,"
            "Odoo Community Association (OCA)",
  'website': 'http://odoo-connector.com',
@@ -66,10 +66,13 @@ It features:
 It is actually used to connect Magento_ and Prestashop_
 
 .. _Magento: http://odoo-magento-connector.com
-.. _Prestashop: https://launchpad.net/prestashoperpconnect
+.. _Prestashop: https://github.com/OCA/connector-prestashop
 """,
  'depends': ['mail'
              ],
+ 'external_dependencies': {'python': ['requests'
+                                      ],
+                           },
  'data': ['security/connector_security.xml',
           'security/ir.model.access.csv',
           'queue/model_view.xml',
