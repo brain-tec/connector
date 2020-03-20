@@ -42,7 +42,7 @@ class QueueJob(orm.Model):
     _inherit = ['mail.thread', 'ir.needaction_mixin']
     _log_access = False
 
-    _order = 'date_created DESC, date_done DESC'
+    _order = 'date_created ASC, date_done DESC'
 
     _removal_interval = 30  # days
 
