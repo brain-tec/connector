@@ -27,10 +27,10 @@ from openerp.osv import orm, fields
 from openerp.tools import DEFAULT_SERVER_DATETIME_FORMAT
 from openerp.tools.translate import _
 
-from .job import STATES, DONE, PENDING, OpenERPJobStorage
-from .worker import WORKER_TIMEOUT
-from ..session import ConnectorSession
-from .worker import watcher
+from job import STATES, DONE, PENDING, OpenERPJobStorage
+from worker import WORKER_TIMEOUT
+from openerp.addons.connector.session import ConnectorSession
+from worker import watcher
 
 _logger = logging.getLogger(__name__)
 
