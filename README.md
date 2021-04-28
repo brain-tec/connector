@@ -22,6 +22,8 @@ addon | version | summary
 [component](component/) | 14.0.1.0.2 | Add capabilities to register and use decoupled components, as an alternative to model classes
 [component_event](component_event/) | 14.0.1.0.2 | Components Events
 [connector](connector/) | 14.0.1.0.0 | Connector
+[test_component](test_component/) | 14.0.1.0.0 | Automated tests for Components, do not install.
+[test_connector](test_connector/) | 14.0.1.0.0 | Automated tests for Connector, do not install.
 
 [//]: # (end addons)
 
